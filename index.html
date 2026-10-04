@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TABTAX v03 — switch cost maze</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:#020403;color:#d8ffe6;font-family:Consolas,"Courier New",monospace}
+body{display:grid;place-items:center}
+#frame{position:relative;width:1080px;height:1350px;background:#050805;overflow:hidden;box-shadow:0 0 80px #0a2a1633}
+canvas{display:block;position:absolute;inset:0;width:100%;height:100%}
+#hud{position:absolute;right:22px;bottom:14px;z-index:5;display:flex;gap:6px}
+#hud button{background:#0a1610;border:1px solid #365341;color:#a9c8b3;font:11px Consolas,monospace;letter-spacing:.5px;padding:5px 8px;cursor:pointer}
+#hud button:hover{background:#254532;color:#efffee}
+</style>
+</head>
+<body>
+<main id="frame">
+  <canvas id="c" width="1080" height="1350" aria-label="TABTAX operator friction maze"></canvas>
+  <div id="hud">
+    <button id="pause">Ⅱ PAUSE</button>
+    <button id="full">⛶ FULL</button>
+  </div>
+</main>
+<script>
+'use strict';
+(()=>{
+const canvas=document.getElementById('c'),W=1080,H=1350,TAU=Math.PI*2;
+const ctx=canvas.getContext('2d',{alpha:false});
+const col={
+  bg:'#050805',panel:'#08120d',line:'#294232',dim:'#71917c',
+  green:'#39ff8a',mint:'#c4f3d3',white:'#e8fff0',
+  orange:'#ff8a2b',amber:'#e5bd75',red:'#ff6557'
+};
+const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
+const mix=(a,b,t)=>a+(b-a)*t;
+const smooth=(a,b,x)=>{const v=clamp((x-a)/(b-a));return v*v*(3-2*v)};
+const fract=x=>x-Math.floor(x);
+const hash=n=>fract(Math.sin(n*127.1+311.7)*43758.5453);
+
+let time=0,last=null,paused=false,solBag=1.15,candles=[],candleOpen=1.15,lastCandleT=-1;
+// seed a visible history of OHLC candles
+(()=>{
+  let p=1.05;
+  for(let i=0;i<28;i++){
+    const drift=Math.sin(i*.55)*.18+(hash(i*13)-.5)*.12;
+    const o=p, c=clamp(p+drift,.35,3.8);
+    const hi=Math.max(o,c)+.04+hash(i*3)*.12;
+    const lo=Math.min(o,c)-.04-hash(i*7)*.1;
+    candles.push({o,h:hi,l:Math.max(.2,lo),c});
+    p=c;
+  }
+  solBag=p;candleOpen=p;
+})();
+
+function fit(){
+  const s=Math.min(innerWidth/W,innerHeight/H);
+  canvas.style.width=(W*s)+'px';
+  canvas.style.height=(H*s)+'px';
+  document.getElementById('frame').style.width=(W*s)+'px';
+  document.getElementById('frame').style.height=(H*s)+'px';
+}
+fit();addEventListener('resize',fit);
+
+document.getElementById('pause').onclick=()=>{paused=!paused;document.getElementById('pause').textContent=paused?'▶ PLAY':'Ⅱ PAUSE'};
+document.getElementById('full').onclick=()=>document.documentElement.requestFullscreen?.();
+addEventListener('keydown',e=>{
+  if(e.code==='Space'){paused=!paused;document.getElementById('pause').textContent=paused?'▶ PLAY':'Ⅱ PAUSE';e.preventDefault()}
+  if(e.key==='f'||e.key==='F')document.documentElement.requestFullscreen?.();
+});
+
+function txt(s,x,y,size=13,color=col.dim,weight='400',align='left'){
+  ctx.font=`${weight} ${size}px ${size>=40?'Arial,sans-serif':'Consolas,monospace'}`;
+  ctx.fillStyle=color;ctx.textAlign=align;ctx.fillText(s,x,y);ctx.textAlign='left';
+}
+function ln(x,y,x2,y2,color=col.line,w=1){
+  ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x2,y2);ctx.strokeStyle=color;ctx.lineWidth=w;ctx.stroke();
+}
+function rect(x,y,w,h,fill,stroke){
+  if(fill){ctx.fillStyle=fill;ctx.fillRect(x,y,w,h)}
+  if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=1;ctx.strokeRect(x+.5,y+.5,w-1,h-1)}
+}
+function glow(x,y,r,color){
+  const g=ctx.createRadialGradient(x,y,0,x,y,r);
+  g.addColorStop(0,color);g.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=g;ctx.fillRect(x-r,y-r,r*2,r*2);
+}
+function panel(x,y,w,h,code,title){
+  rect(x,y,w,h,col.panel,col.line);
+  // corner ticks
+  ln(x,y,x+14,y,col.green,1.5);ln(x,y,x,y+14,col.green,1.5);
+  ln(x+w,y,x+w-14,y,col.green,1.5);ln(x+w,y,x+w,y+14,col.green,1.5);
+  ln(x,y+h,x+14,y+h,col.green,1.5);ln(x,y+h,x,y+h-14,col.green,1.5);
+  ln(x+w,y+h,x+w-14,y+h,col.green,1.5);ln(x+w,y+h,x+w,y+h-14,col.green,1.5);
+  txt(code,x+12,y+22,11,col.green,'600');
+  txt(title,x+48,y+22,12,col.mint,'600');
+  ln(x+10,y+32,x+w-10,y+32,'#203a2a');
+}
+
+// maze
+const COLS=11,ROWS=9;
+const maze=[
+  [1,1,1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,1,0,0,0,0,1],
+  [1,0,1,1,0,1,0,1,1,0,1],
+  [1,0,1,0,0,0,0,0,1,0,1],
+  [1,0,1,0,1,1,1,0,1,0,1],
+  [1,0,0,0,0,0,1,0,0,0,1],
+  [1,0,1,1,1,0,1,1,1,0,1],
+  [1,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,1,1,1,1]
+];
+const hopPath=[[1,1],[2,1],[3,1],[4,1],[4,2],[4,3],[3,3],[2,3],[1,3],[1,4],[1,5],[2,5],[3,5],[3,6],[3,7],[4,7],[5,7],[5,6],[5,5],[6,5],[7,5],[7,6],[7,7],[8,7],[9,7],[9,6],[9,5],[9,4],[9,3]];
+const deskPath=[[1,1],[1,2],[1,3],[1,4],[1,5],[1,6],[1,7],[2,7],[3,7],[4,7],[5,7],[6,7],[7,7],[8,7],[9,7],[9,6],[9,5],[9,4],[9,3]];
+const missCells=[[4,1],[2,3],[5,5],[7,5],[9,6]];
+
+// drones flying above maze
+const drones=Array.from({length:7},(_,i)=>({
+  id:i,
+  phase:hash(i*17)*TAU,
+  speed:.35+.25*hash(i*3),
+  amp:18+12*hash(i*9),
+  kind:i%3 // 0 hop orb, 1 desk orb, 2 spark
+}));
+
+function iso(i,j,k=0,scale=42){
+  return {
+    x:(i-j)*scale*0.95,
+    y:(i+j)*scale*0.50 - k*24
+  };
+}
+function pathPoint(path,u){
+  const max=path.length-1;
+  const f=clamp(u)*max;
+  const i=Math.floor(f),t=f-i;
+  const a=path[Math.min(i,max)],b=path[Math.min(i+1,max)];
+  return {i:mix(a[0],b[0],t),j:mix(a[1],b[1],t),seg:i};
+}
+
+function drawBlock(x,y,h,fillTop,edge){
+  const hx=40,hy=21;
+  // right face
+  ctx.beginPath();ctx.moveTo(x,y-h);ctx.lineTo(x+hx,y-hy-h);ctx.lineTo(x+hx,y-hy);ctx.lineTo(x,y);ctx.closePath();
+  ctx.fillStyle='rgba(0,0,0,.45)';ctx.fill();
+  // left face
+  ctx.beginPath();ctx.moveTo(x,y-h);ctx.lineTo(x-hx,y-hy-h);ctx.lineTo(x-hx,y-hy);ctx.lineTo(x,y);ctx.closePath();
+  ctx.fillStyle='rgba(0,0,0,.28)';ctx.fill();
+  // top
+  ctx.beginPath();ctx.moveTo(x,y-h);ctx.lineTo(x+hx,y-hy-h);ctx.lineTo(x,y-2*hy-h);ctx.lineTo(x-hx,y-hy-h);ctx.closePath();
+  ctx.fillStyle=fillTop;ctx.fill();
+  ctx.strokeStyle=edge;ctx.lineWidth=1.2;ctx.stroke();
+}
+
+function drawTube(x,y,h,fill,label,value,max){
+  const ratio=clamp(value/max);
+  const filled=h*ratio;
+  // glass
+  ctx.strokeStyle='#2f5a3d';ctx.lineWidth=2;
+  ctx.strokeRect(x-16,y-h,32,h);
+  ctx.fillStyle='rgba(8,20,12,.65)';ctx.fillRect(x-15,y-h+1,30,h-2);
+  // fill from bottom
+  const g=ctx.createLinearGradient(x,y,x,y-filled);
+  g.addColorStop(0,fill);g.addColorStop(1,fill+'aa');
+  ctx.fillStyle=g;ctx.fillRect(x-13,y-filled,26,filled);
+  // ticks
+  for(let i=0;i<=4;i++){const yy=y-h*i/4;ln(x+18,yy,x+24,yy,'#355f42')}
+  txt(label,x,y-h-18,10,col.dim,'600','center');
+  txt(String(Math.round(value)),x,y-h-4,13,fill,'700','center');
+}
+
+function drawDrone(x,y,kind,t,hot){
+  ctx.save();ctx.translate(x,y);
+  const bob=Math.sin(t*6)*.5;
+  ctx.translate(0,bob);
+  if(kind===0){
+    // hop scout - orange spider-ish
+    glow(0,0,22,'#ff8a2b44');
+    ctx.strokeStyle=col.orange;ctx.fillStyle='#3a1c08';ctx.lineWidth=1.5;
+    for(let i=0;i<6;i++){
+      const a=i/6*TAU+t*2;
+      ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(Math.cos(a)*16,Math.sin(a)*10);ctx.stroke();
+    }
+    ctx.beginPath();ctx.arc(0,0,6,0,TAU);ctx.fill();ctx.stroke();
+    ctx.fillStyle=hot?col.red:col.orange;ctx.beginPath();ctx.arc(-2,-1,1.5,0,TAU);ctx.arc(2,-1,1.5,0,TAU);ctx.fill();
+  }else if(kind===1){
+    // desk probe - green tetra
+    glow(0,0,24,'#39ff8a33');
+    ctx.fillStyle='#0d2a18';ctx.strokeStyle=col.green;ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(0,-10);ctx.lineTo(9,6);ctx.lineTo(-9,6);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.beginPath();ctx.arc(0,0,3,0,TAU);ctx.fillStyle=col.mint;ctx.fill();
+  }else{
+    // spark shard
+    ctx.strokeStyle=col.mint;ctx.globalAlpha=.7;
+    ctx.beginPath();ctx.moveTo(-5,0);ctx.lineTo(5,0);ctx.moveTo(0,-5);ctx.lineTo(0,5);ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawScene(t){
+  const sx=28,sy=148,sw=1024,sh=760;
+  rect(sx,sy,sw,sh,'#060c09',col.line);
+  // grid bg
+  ctx.save();ctx.beginPath();ctx.rect(sx,sy,sw,sh);ctx.clip();
+  for(let x=sx;x<sx+sw;x+=28)ln(x,sy,x,sy+sh,'#12301c55');
+  for(let y=sy;y<sy+sh;y+=28)ln(sx,y,sx+sw,y,'#12301c55');
+
+  const cycle=20;
+  const u=(t%cycle)/cycle;
+  const deskMode=u>0.52;
+  const merge=deskMode?smooth(0.52,1,u):0;
+  const hopU=deskMode?1:u/0.52;
+  const hops=Math.floor(hopU*(hopPath.length-1));
+
+  // CENTER the maze on its isometric midpoint
+  const mid=iso((COLS-1)/2,(ROWS-1)/2,0,46);
+  const ox=sx+sw*0.50-mid.x, oy=sy+sh*0.38-mid.y;
+
+  // depth-sorted walls
+  const cells=[];
+  for(let j=0;j<ROWS;j++)for(let i=0;i<COLS;i++){
+    cells.push({i,j,wall:maze[j][i]===1,z:i+j});
+  }
+  cells.sort((a,b)=>a.z-b.z);
+
+  for(const cell of cells){
+    const p=iso(cell.i,cell.j,0,46);
+    const x=ox+p.x,y=oy+p.y;
+    if(cell.wall){
+      const pulse=.45+.2*Math.sin(t*1.3+cell.i*.5+cell.j*.4);
+      drawBlock(x,y,30+4*Math.sin(t+cell.i),`rgba(28,160,88,${pulse})`,'rgba(57,255,138,.55)');
+    }else{
+      ctx.beginPath();
+      ctx.moveTo(x,y);ctx.lineTo(x+40,y+21);ctx.lineTo(x,y+42);ctx.lineTo(x-40,y+21);ctx.closePath();
+      ctx.fillStyle='rgba(18,55,34,0.45)';ctx.fill();
+      ctx.strokeStyle='rgba(57,255,138,0.14)';ctx.stroke();
+    }
+  }
+
+  // paths
+  function strokePath(path,prog,color,width,dash){
+    ctx.save();
+    ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineJoin='round';ctx.lineCap='round';
+    ctx.shadowColor=color;ctx.shadowBlur=14;
+    if(dash)ctx.setLineDash(dash);
+    ctx.beginPath();
+    const n=Math.max(2,Math.floor(prog*(path.length-1))+1);
+    for(let k=0;k<=n;k++){
+      const uu=k/Math.max(1,path.length-1);
+      const pt=pathPoint(path,Math.min(uu,prog));
+      const p=iso(pt.i,pt.j,0.15,46);
+      const x=ox+p.x,y=oy+p.y-10;
+      k?ctx.lineTo(x,y):ctx.moveTo(x,y);
+    }
+    ctx.stroke();ctx.restore();
+  }
+  if(merge<0.9) strokePath(hopPath,hopU,`rgba(255,138,43,${0.9*(1-merge*.7)})`,5.5,[8,6]);
+  if(deskMode) strokePath(deskPath,merge,`rgba(57,255,138,${0.55+.45*merge})`,6.5,null);
+
+  // miss X marks
+  missCells.forEach((c,idx)=>{
+    if(hops<idx*4)return;
+    const p=iso(c[0],c[1],0.3,46);
+    const x=ox+p.x,y=oy+p.y-8;
+    ctx.save();ctx.strokeStyle=col.red;ctx.lineWidth=2.5;ctx.shadowColor=col.red;ctx.shadowBlur=8;
+    ctx.beginPath();ctx.moveTo(x-8,y-8);ctx.lineTo(x+8,y+8);ctx.moveTo(x+8,y-8);ctx.lineTo(x-8,y+8);ctx.stroke();
+    ctx.restore();
+  });
+
+  // START / EXIT
+  const st=iso(1,1,1.1,46), ex=iso(9,3,1.2,46);
+  glow(ox+st.x,oy+st.y-20,28,'#ff8a2b33');
+  txt('TASK START',ox+st.x,oy+st.y-48,11,col.orange,'700','center');
+  glow(ox+ex.x,oy+ex.y-24,36,'#39ff8a44');
+  drawBlock(ox+ex.x,oy+ex.y,48,deskMode?'rgba(57,255,138,.9)':'rgba(57,255,138,.35)','#39ff8a');
+  txt('EXIT = PRINT',ox+ex.x,oy+ex.y-62,11,col.green,'700','center');
+
+  // main agents on paths
+  const hopA=pathPoint(hopPath,hopU);
+  const ha=iso(hopA.i,hopA.j,0.7,46);
+  if(merge<0.75){
+    ctx.save();ctx.scale(1.25,1.25);
+    drawDrone((ox+ha.x)/1.25,(oy+ha.y-26)/1.25,0,t,true);
+    ctx.restore();
+    txt('HOP '+hops,ox+ha.x+18,oy+ha.y-34,12,col.orange,'700');
+  }
+  if(deskMode){
+    const da=pathPoint(deskPath,merge);
+    const d=iso(da.i,da.j,0.75,46);
+    ctx.save();ctx.scale(1.25,1.25);
+    drawDrone((ox+d.x)/1.25,(oy+d.y-26)/1.25,1,t,false);
+    ctx.restore();
+    txt('DESK',ox+d.x+16,oy+d.y-34,12,col.green,'700');
+  }
+
+  // flying drones around maze volume
+  drones.forEach((dr,i)=>{
+    const ang=dr.phase+t*dr.speed;
+    const orbitI=2.2+4.2*Math.cos(ang);
+    const orbitJ=1.8+3.8*Math.sin(ang*1.15);
+    const k=1.1+0.7*Math.sin(t*2.2+dr.phase)+dr.amp/35;
+    const p=iso(orbitI,orbitJ,k,46);
+    const fade=dr.kind===0?(1-merge*.5):(dr.kind===1?(0.4+merge*.6):0.7);
+    ctx.save();ctx.globalAlpha=fade;ctx.translate(ox+p.x,oy+p.y);ctx.scale(1.15,1.15);
+    drawDrone(0,0,dr.kind,t+i,false);
+    ctx.restore();
+  });
+
+  // floating particles / sparks
+  for(let i=0;i<40;i++){
+    const px=sx+40+hash(i*3)* (sw-80);
+    const py=sy+40+fract(hash(i+9)+t*(0.08+hash(i)*.12))*(sh-80);
+    const a=.15+hash(i+2)*.4;
+    ctx.fillStyle=i%4===0?`rgba(255,138,43,${a})`:`rgba(57,255,138,${a})`;
+    ctx.fillRect(px,py,i%5===0?2:1,1);
+  }
+
+  // budget tubes left/right of maze
+  const taxLeft=Math.max(0,100-hops*3.2*(1-merge));
+  const deskFill=mix(12,100,merge);
+  drawTube(sx+58,sy+sh-70,210,col.orange,'TAB BUDGET',taxLeft,100);
+  drawTube(sx+sw-58,sy+sh-70,210,col.green,'DESK SOL',deskFill,100);
+
+  // callout cards with leader lines
+  function callout(x,y,tx,ty,title,val,tone){
+    const cstroke=tone==='o'?col.orange:tone==='r'?col.red:col.green;
+    ln(x,y,tx,ty,cstroke+'88',1);
+    rect(tx,ty,132,44,'#08120dee',cstroke);
+    txt(title,tx+8,ty+16,10,col.dim,'600');
+    txt(val,tx+8,ty+34,14,cstroke,'700');
+  }
+  callout(ox+ha.x,oy+ha.y-20,sx+90,sy+50,'HOP TAX',(hops*0.31*(1-merge)).toFixed(1)+' %','o');
+  callout(ox+(deskMode?iso(pathPoint(deskPath,merge).i,pathPoint(deskPath,merge).j,0.7,46).x:ex.x),
+          oy+40,sx+sw-230,sy+50,'ROUND SOL', (solBag).toFixed(2)+' SOL','g');
+  callout(ox+ex.x,oy+ex.y-40,sx+sw-230,sy+sh-90,'GATE',deskMode&&merge>.85?'OPEN':'ARMED',deskMode?'g':'o');
+  callout(ox-120,oy+220,sx+90,sy+sh-90,'WINDOWS',merge>.7?'1 DESK':'5 TABS',merge>.7?'g':'o');
+
+  // scene chrome
+  txt('01 TAB MAZE',sx+16,sy+24,12,col.dim,'600');
+  txt(deskMode?(merge>.85?'ONE DESK LOCK':'COLLAPSE ROUTE'):'SCATTER HOPS',sx+120,sy+24,12,col.green,'700');
+  txt('T+'+t.toFixed(2),sx+sw-16,sy+24,12,col.amber,'600','right');
+  txt('orange = tab hops / tax',sx+sw-16,sy+42,11,col.dim,'400','right');
+  txt('green = one desk path',sx+sw-16,sy+58,11,col.dim,'400','right');
+
+  ctx.restore();
+
+  // SOL equity dynamics → live candlesticks
+  const tick=Math.floor(t*8);
+  if(tick!==lastCandleT){
+    lastCandleT=tick;
+    const stepTax=!deskMode? -0.03-0.04*hash(tick) : -0.005*hash(tick+3);
+    const stepWin=deskMode&&merge>0.25? 0.06+0.07*hash(tick+9) : 0.01*hash(tick+2);
+    const noise=(hash(tick*1.7)-.5)*.035;
+    solBag=clamp(solBag+stepTax+stepWin+noise,.2,4.2);
+    // new candle every ~0.55s
+    if(tick%5===0){
+      const prev=candles[candles.length-1];
+      const o=prev?prev.c:candleOpen;
+      const c=solBag;
+      const hi=Math.max(o,c)+.02+hash(tick)*.08;
+      const lo=Math.min(o,c)-.02-hash(tick+4)*.07;
+      candles.push({o,h:hi,l:Math.max(.15,lo),c});
+      if(candles.length>32)candles.shift();
+      candleOpen=c;
+    }else if(candles.length){
+      // update forming candle wick/body
+      const cur=candles[candles.length-1];
+      cur.c=solBag;
+      cur.h=Math.max(cur.h,solBag,cur.o);
+      cur.l=Math.min(cur.l,solBag,cur.o);
+    }
+  }
+
+  return {hops,merge,deskMode,hopU,taxLeft,deskFill,tax:hops*0.31*(1-merge)};
+}
+
+function drawPanels(t,s){
+  const y0=928,h=318,gap=10;
+  const w1=250,w2=240,w3=240,w4=1024-w1-w2-w3-3*gap;
+  const x1=28,x2=x1+w1+gap,x3=x2+w2+gap,x4=x3+w3+gap;
+
+  // 02 SOL EQUITY — full candlestick chart
+  panel(x1,y0,w1,h,'02','SOL EQUITY');
+  const upNow=candles.length?candles[candles.length-1].c>=candles[candles.length-1].o:true;
+  txt((solBag>=0?'+':'')+solBag.toFixed(2),x1+12,y0+56,28,upNow?col.green:col.red,'700');
+  txt('SOL',x1+118,y0+56,14,col.dim);
+
+  const chartX=x1+14, chartY=y0+70, chartW=w1-28, chartH=h-100;
+  // chart frame + grid
+  rect(chartX,chartY,chartW,chartH,null,'#203a2a');
+  for(let g=1;g<4;g++){
+    const gy=chartY+chartH*g/4;
+    ln(chartX,gy,chartX+chartW,gy,'#153022');
+  }
+  // scale from visible candles
+  let lo=Infinity,hi=-Infinity;
+  for(const k of candles){lo=Math.min(lo,k.l);hi=Math.max(hi,k.h)}
+  if(!isFinite(lo)){lo=0;hi=2}
+  const pad=(hi-lo)*.12||.2;lo-=pad;hi+=pad;
+  const yAt=v=>chartY+chartH-((v-lo)/(hi-lo))*chartH;
+  const n=candles.length;
+  const slot=chartW/Math.max(1,n);
+  const bodyW=Math.max(3,slot*.62);
+  for(let i=0;i<n;i++){
+    const k=candles[i];
+    const cx=chartX+slot*i+slot*.5;
+    const up=k.c>=k.o;
+    const color=up?col.green:col.red;
+    // wick
+    ln(cx,yAt(k.h),cx,yAt(k.l),color,1.4);
+    // body
+    const y1=yAt(Math.max(k.o,k.c)), y2=yAt(Math.min(k.o,k.c));
+    const bh=Math.max(2,y2-y1);
+    ctx.fillStyle=up?color:color;
+    ctx.globalAlpha=up?0.9:0.85;
+    ctx.fillRect(cx-bodyW/2,y1,bodyW,bh);
+    ctx.globalAlpha=1;
+    ctx.strokeStyle=color;ctx.lineWidth=1;ctx.strokeRect(cx-bodyW/2+.5,y1+.5,bodyW-1,Math.max(1,bh-1));
+  }
+  // live price line
+  const py=yAt(solBag);
+  ln(chartX,py,chartX+chartW,py,upNow?'#39ff8a66':'#ff655766',1);
+  txt(s.deskMode?'desk path compounding':'tab hops bleeding bag',x1+12,y0+h-10,10,col.dim);
+
+  // 03 MISS MAP
+  panel(x2,y0,w2,h,'03','MISS MAP');
+  txt(String(Math.min(5,1+Math.floor(s.hops/5))),x2+12,y0+58,28,col.red,'700');
+  txt('DEAD ENDS',x2+50,y0+58,12,col.dim);
+  const cell=18;
+  for(let j=0;j<ROWS;j++)for(let i=0;i<COLS;i++){
+    const x=x2+22+i*cell,y=y0+78+j*cell;
+    rect(x,y,cell-2,cell-2,maze[j][i]?'rgba(24,140,80,.25)':'#0a1510', '#1e3a28');
+  }
+  missCells.forEach((c,idx)=>{
+    if(s.hops<idx*4)return;
+    txt('×',x2+28+c[0]*cell,y0+92+c[1]*cell,14,col.red,'700');
+  });
+  if(s.deskMode){
+    deskPath.forEach((p,idx)=>{
+      if(idx/deskPath.length>s.merge)return;
+      ctx.fillStyle=col.green;ctx.beginPath();
+      ctx.arc(x2+30+p[0]*cell,y0+86+p[1]*cell,2.5,0,TAU);ctx.fill();
+    });
+  }
+  txt('BACKTRACKS  '+(s.deskMode?2:7+Math.floor(s.hops/3)),x2+12,y0+h-28,11,col.orange);
+  txt('DESK TURNS  '+(s.deskMode?Math.floor(s.merge*8):0),x2+12,y0+h-12,11,col.green);
+
+  // 04 HOP LEDGER / bars rising falling
+  panel(x3,y0,w3,h,'04','HOP LEDGER');
+  txt(s.tax.toFixed(1)+'%',x3+12,y0+58,28,col.orange,'700');
+  txt('TAX / ROUND',x3+100,y0+58,11,col.dim);
+  const labels=['launch','tg','chart','bundler','wallets','desk'];
+  for(let i=0;i<6;i++){
+    const base=i===5?s.merge: (1-s.merge)*(0.35+0.55*Math.abs(Math.sin(t*1.1+i)));
+    const bh=20+base*150;
+    const x=x3+18+i*36;
+    ctx.fillStyle=i===5?col.green:col.orange;
+    ctx.globalAlpha=0.35+base*0.55;
+    ctx.fillRect(x,y0+h-40-bh,26,bh);
+    ctx.globalAlpha=1;
+    txt(labels[i].slice(0,3),x+13,y0+h-22,9,col.dim,'400','center');
+  }
+  // oscillating line
+  ctx.beginPath();
+  for(let x=0;x<w3-24;x++){
+    const yy=y0+100+Math.sin(x*.08+t*2.4)*(s.deskMode?8:26)+Math.sin(x*.2+t)*(s.deskMode?4:12);
+    x?ctx.lineTo(x3+12+x,yy):ctx.moveTo(x3+12+x,yy);
+  }
+  ctx.strokeStyle=col.mint;ctx.lineWidth=1.5;ctx.stroke();
+
+  // 05 SESSION LOG with SOL prints
+  panel(x4,y0,w4,h,'05','SESSION LOG');
+  txt((solBag>=0?'+':'')+solBag.toFixed(2),x4+12,y0+58,26,col.green,'700');
+  txt('SOL KEPT',x4+120,y0+52,11,col.dim);
+  const events=[
+    ['o','hop launch → chart','TAX −0.11 SOL'],
+    ['r','candle moved mid-switch','MISS'],
+    ['o','hop tg → bundler','TAX −0.09 SOL'],
+    ['g','desk route armed','GATE OPEN'],
+    ['g','print filled L1','+0.42 SOL'],
+    ['r','wallet check lag','DEAD END'],
+    ['g','session stayed put','+0.28 SOL'],
+    ['o','five tabs reopen','DEBT'],
+    ['g','launch+trade same seat','+0.55 SOL'],
+    ['g','vault sweep','BANKED']
+  ];
+  ctx.save();ctx.beginPath();ctx.rect(x4+8,y0+70,w4-16,h-84);ctx.clip();
+  const scroll=t*70,step=Math.floor(scroll/20),off=scroll%20;
+  for(let i=0;i<12;i++){
+    const n=step-i;
+    const ev=events[((n%events.length)+events.length)%events.length];
+    const yy=y0+74+i*20+off-20;
+    const color=ev[0]==='g'?col.green:ev[0]==='r'?col.red:col.orange;
+    txt(String(100+((n%800)+800)%800).padStart(3,'0'),x4+12,yy+12,11,'#4f735c');
+    txt(ev[1],x4+52,yy+12,12,col.mint);
+    txt(ev[2],x4+w4-12,yy+12,11,color,'600','right');
+  }
+  ctx.restore();
+}
+
+function drawChrome(t,s){
+  rect(0,0,W,H,col.bg);
+  // outer corners
+  ln(12,12,34,12,col.green,2);ln(12,12,12,34,col.green,2);
+  ln(W-12,12,W-34,12,col.green,2);ln(W-12,12,W-12,34,col.green,2);
+  ln(12,H-12,34,H-12,col.green,2);ln(12,H-12,12,H-34,col.green,2);
+  ln(W-12,H-12,W-34,H-12,col.green,2);ln(W-12,H-12,W-12,H-34,col.green,2);
+
+  txt('PUMP.FUN / OPERATOR FRICTION / SWITCH COST METER',28,36,12,col.green,'600');
+  txt('TABTAX',28,96,64,col.white,'800');
+  glow(120,80,90,'#39ff8a18');
+
+  rect(28,112,620,28,'#08120d',col.line);
+  txt('PATH  ',36,130,11,col.dim);
+  txt('5 TABS',78,130,11,col.orange,'700');
+  txt(' → HOP TAX → CANDLE LAG → MISS  //  ',140,130,11,col.dim);
+  txt('ONE DESK',430,130,11,col.green,'700');
+  txt(' → PRINT',500,130,11,col.dim);
+
+  txt('@kaivornxbt',W-28,36,13,col.red,'700','right');
+  txt('EVERY SWITCH COSTS A CANDLE',W-28,56,12,col.green,'600','right');
+  txt('PHASE '+(s.deskMode?'DESK':'HOPS')+'   ROUND 01',W-28,78,11,col.amber,'400','right');
+
+  // footer
+  ln(28,1260,W-28,1260,col.line);
+  txt('01 OPEN TABS  //  02 PAY SWITCH TAX  //  03 LOSE CANDLE  //  04 COLLAPSE TO ONE DESK  //  05 KEEP PRINT',28,1290,11,col.dim);
+  txt('ILLUSTRATIVE',W-28,1290,11,col.green,'600','right');
+}
+
+function frame(now){
+  if(last==null)last=now;
+  const dt=Math.min(0.05,(now-last)/1000);last=now;
+  if(!paused)time+=dt;
+  const s=(()=>{drawChrome(time,{deskMode:false}); const st=drawScene(time); drawPanels(time,st); return st})();
+  // redraw chrome under? actually drawChrome first then scene - wait, drawChrome clears. Order is correct.
+  requestAnimationFrame(frame);
+}
+// fix order: chrome clears everything - need single pass
+function loop(now){
+  if(last==null)last=now;
+  const dt=Math.min(0.05,(now-last)/1000);last=now;
+  if(!paused)time+=dt;
+  // clear via chrome
+  rect(0,0,W,H,col.bg);
+  const sRef={deskMode:(time%20)/20>0.52, hops:0};
+  // precompute phase for header
+  const u=(time%20)/20;
+  sRef.deskMode=u>0.52;
+  // header
+  ln(12,12,34,12,col.green,2);ln(12,12,12,34,col.green,2);
+  ln(W-12,12,W-34,12,col.green,2);ln(W-12,12,W-12,34,col.green,2);
+  ln(12,H-12,34,H-12,col.green,2);ln(12,H-12,12,H-34,col.green,2);
+  ln(W-12,H-12,W-34,H-12,col.green,2);ln(W-12,H-12,W-12,H-34,col.green,2);
+  txt('PUMP.FUN / OPERATOR FRICTION / SWITCH COST METER',28,36,12,col.green,'600');
+  txt('TABTAX',28,96,64,col.white,'800');
+  glow(140,78,100,'#39ff8a14');
+  rect(28,112,640,28,'#08120d',col.line);
+  txt('5 TABS',40,130,11,col.orange,'700');
+  txt('→ HOP TAX → CANDLE LAG → MISS  //  ONE DESK → PRINT',100,130,11,col.dim);
+  txt('@kaivornxbt',W-28,36,13,col.red,'700','right');
+  txt('EVERY SWITCH COSTS A CANDLE',W-28,56,12,col.green,'600','right');
+  txt('PHASE '+(sRef.deskMode?'DESK':'HOPS')+'   T+'+time.toFixed(2),W-28,78,11,col.amber,'400','right');
+
+  const s=drawScene(time);
+  drawPanels(time,s);
+  ln(28,1260,W-28,1260,col.line);
+  txt('01 OPEN TABS  //  02 PAY SWITCH TAX  //  03 LOSE CANDLE  //  04 COLLAPSE TO ONE DESK  //  05 KEEP PRINT',28,1290,11,col.dim);
+  txt('ILLUSTRATIVE',W-28,1290,11,col.green,'600','right');
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
